@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from modules import *  # MultiHeadAttention, PositionwiseFeedForward
 from utility import extract_axis_1
-
+import faiss
 
 class SinusoidalPositionEmbeddings(nn.Module):
     def __init__(self, dim):
@@ -26,6 +26,8 @@ class Tenc(nn.Module):
         self.hidden_size = hidden_size
         self.item_num = int(item_num)
         self.device = device
+        self.faiss_index = None
+        self.use_faiss = True
         # embeddings
         self.item_embeddings = nn.Embedding(item_num+1, hidden_size)
         nn.init.normal_(self.item_embeddings.weight, 0, 1)
@@ -56,6 +58,23 @@ class Tenc(nn.Module):
                 nn.GELU(),
                 nn.Linear(hidden_size*2, hidden_size)
             )
+
+    def build_faiss_index(self):
+        # BRUTE FORCE
+        item_embeddings = self.item_embeddings.weight.detach().cpu().numpy()[:self.item_num]
+        self.index_dim = self.hidden_size
+        self.faiss_index = faiss.IndexFlatIP(self.index_dim)
+        self.faiss_index.add(item_embeddings)
+
+        # INVERTED FILE INDEX
+        # nlist = 200
+        # self.index_dim = self.hidden_size
+        # quantizer = faiss.IndexFlatIP(self.index_dim)
+        # self.faiss_index = faiss.IndexIVFFlat(quantizer, self.index_dim, nlist, faiss.METRIC_INNER_PRODUCT)
+        # item_embeddings = self.item_embeddings.weight.detach().cpu().numpy()[:self.item_num]
+        # self.faiss_index.train(item_embeddings)
+        # self.faiss_index.add(item_embeddings)
+        # self.faiss_index.nprobe = 100
 
     def forward(self, x, h, step):
         t = self.step_mlp(step)
@@ -97,6 +116,18 @@ class Tenc(nn.Module):
         # one-step sampling
         x0 = diff.sample(self.forward, self.forward_uncon,
                          h, self.device, steps)
-        emb = self.item_embeddings.weight  # (item_num+1, hidden_size)
-        scores = torch.matmul(x0, emb.T)
-        return scores
+        
+        if self.use_faiss and self.faiss_index is None:
+            self.build_faiss_index()
+    
+        if self.use_faiss:
+            query_vectors = x0.detach().cpu().numpy()
+            distances, indices = self.faiss_index.search(query_vectors, 100)
+            scores = torch.zeros((x0.shape[0], self.item_num), device=self.device)
+            batch_indices = torch.arange(x0.shape[0]).unsqueeze(1).expand(-1, 100)
+            scores[batch_indices, torch.tensor(indices, device=self.device)] = torch.tensor(distances, device=self.device)
+            return scores
+        else:
+            emb = self.item_embeddings.weight  # (item_num+1, hidden_size)
+            scores = torch.matmul(x0, emb.T)
+            return scores

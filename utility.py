@@ -42,6 +42,10 @@ def evaluate(model, test_data, diff, device, steps=1):
         bt = torch.LongTensor(
             np.array(tgt[i*batch_size:(i+1)*batch_size], dtype=np.int64)).to(device)
         # states = torch.LongTensor(np.array(bs, dtype=np.int64)).to(device)
+
+        if model.use_faiss and model.faiss_index is None:
+            model.build_faiss_index()
+
         scores = model.predict(bs, bl, diff, steps)
         _, top_idx = scores.topk(100, dim=1)
         arr = top_idx.cpu().numpy()
